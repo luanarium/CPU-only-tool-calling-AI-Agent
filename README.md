@@ -1,9 +1,7 @@
 # CPU-only-tool-calling-AI-Agent
 A setup for running LLMs entirely on your own machine with real tool-calling support: llama-server serving quantized models, wired up to the llm library so it can actually call Python functions.
 
-# How-to
-
-# Local AI Agent — llm + llama-server Setup
+## How-to
 
 This sets up [`llm`](https://llm.datasette.io) to run local GGUF models through **llama-server**, registered as an OpenAI-compatible endpoint — giving full sampler control (`temperature`, `frequency_penalty`, `presence_penalty`, `top_p`, `max_tokens`, etc.) and tool/function calling. `llama_cpp.server` is covered too, but only as a fallback for non-tool use — it does not support tool calling at all, confirmed by testing.
 
