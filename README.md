@@ -2,7 +2,7 @@
 A setup for running LLMs entirely on your own machine with real tool-calling support: llama-server serving quantized models, wired up to the llm library so it can actually call Python functions.
 
 ## Ideal use cases for this kind of agent
-A local, CPU-friendly agent for narrow, well-defined tasks: querying live system state (time, disk, memory, service health) through small deterministic Python tools rather than asking the model to compute or reason over raw data; turning terse fact strings into natural-language reports, the same way a shipboard computer might narrate sensor readings; and exploring where small open-weight models genuinely hold up under real tool-calling conditions versus where they need the surrounding system to do the heavy lifting instead.
+Querying live system state (time, disk, memory, service health) through small deterministic Python tools rather than asking the model to compute or reason over raw data; turning terse fact strings into natural-language reports, the same way a shipboard computer might narrate sensor readings; and exploring where small open-weight models genuinely hold up under real tool-calling conditions versus where they need the surrounding system to do the heavy lifting instead.
 
 ## How-to
 
