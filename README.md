@@ -315,6 +315,7 @@ What each stage does:
 4. `llm` summarizes the cleaned text from stdin.
 
 Limits: long videos can exceed the 4096-token context; raise `--ctx-size` if you have the RAM. Two runs at once overwrite each other's `/tmp` file.
+My tests found this works for videos of up to ~33 minutes in length.
 
 ---
 
