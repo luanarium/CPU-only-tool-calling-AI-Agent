@@ -14,7 +14,7 @@ Querying live system state (time, disk, memory, service health) through small de
 
 ## How-to
 
-This runs a local Qwen2.5-0.5B-Instruct model with `llama-server` (llama.cpp) and registers it with [`llm`](https://llm.datasette.io) as the OpenAI-compatible model `qwen-clean-server`. That setup gives you:
+This runs a local Qwen2.5-0.5B-Instruct model with `llama-server` (llama.cpp) and registers it with [`llm`](https://llm.datasette.io) as the OpenAI-compatible model `qwen-clean-server` (any name will suffice, this is just what I used). That setup gives you:
 
 - sampler control (`temperature`, `frequency_penalty`, `presence_penalty`, `top_p`, `max_tokens`)
 - tool calling from a `tools.py` file
