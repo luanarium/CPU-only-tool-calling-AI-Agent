@@ -1,54 +1,44 @@
+## contents
+
+- [CPU-only tool-calling AI agent](#cpu-only-tool-calling-ai-agent)
+- [Offline / backup notes](#offline--backup-notes)
+
 # CPU-only-tool-calling-AI-Agent
+
 A setup for running LLMs entirely on your own machine with real tool-calling support: llama-server serving quantized models, wired up to the llm library so it can actually call Python functions.
 
 ## Ideal use cases for this kind of agent
+
 Querying live system state (time, disk, memory, service health) through small deterministic Python tools rather than asking the model to compute or reason over raw data; turning terse fact strings into natural-language reports, the same way a shipboard computer might narrate sensor readings; and exploring where small open-weight models genuinely hold up under real tool-calling conditions versus where they need the surrounding system to do the heavy lifting instead.
 
 ## How-to
 
-This sets up [`llm`](https://llm.datasette.io) to run local GGUF models through **llama-server**, registered as an OpenAI-compatible endpoint — giving full sampler control (`temperature`, `frequency_penalty`, `presence_penalty`, `top_p`, `max_tokens`, etc.) and tool/function calling. `llama_cpp.server` is covered too, but only as a fallback for non-tool use — it does not support tool calling at all, confirmed by testing.
+This runs a local Qwen2.5-0.5B-Instruct model with `llama-server` (llama.cpp) and registers it with [`llm`](https://llm.datasette.io) as the OpenAI-compatible model `qwen-clean-server`. That setup gives you:
 
-> **Why not the `llm-llama-cpp` plugin's direct bindings?** That plugin's `Options` schema only exposes `n_gpu_layers`, `n_ctx`, `max_tokens`, `verbose`, `no_gpu` — no sampler params at all. That means no `temperature`, no `repeat_penalty`, nothing to control repetition or randomness, and no tool calling. It's a dead end for actual generation quality, so this README skips it entirely in favor of the server-backed setup below.
+- sampler control (`temperature`, `frequency_penalty`, `presence_penalty`, `top_p`, `max_tokens`)
+- tool calling from a `tools.py` file
+- a YouTube transcript summarizer
+
+> **Why `llama-server`?** The `llm-llama-cpp` plugin exposes no sampler options and has no tool calling. The `llama_cpp.server` bundled with `llama-cpp-python` silently drops tool definitions, which was confirmed by testing. `llama-server --jinja` supports both.
+
+Final layout:
+
+```
+project/
+├── llama-b10795/                        # llama.cpp binaries
+├── qwen2.5-0.5b-instruct-q4_k_m.gguf    # model
+├── tools.py                             # tools for llm
+├── yt-summarize.sh                      # YouTube summarizer
+└── pyproject.toml, uv.lock, .venv/, src/
+```
+
+Tested with: llama.cpp **b10795** (CPU build), `llm` **0.33**, Python **3.10**, `uv` **0.12**, Ubuntu x64.
 
 ---
 
-## 1. Install system dependencies
+## 1. Install uv and create the project
 
-```bash
-sudo apt update && sudo apt install build-essential
-```
-
-Install llama.cpp — this gives you the `llama-server` binary, `llama-cli`, etc. The install script's URL/behavior can drift, so get the current release directly from GitHub instead:
-
-```bash
-curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases | grep '"tag_name": "b' | head -1
-```
-
-That prints the current build tag (e.g. `b10795`). List its assets and find the `ubuntu-x64.tar.gz` one:
-
-```bash
-curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/<TAG> | grep "browser_download_url"
-```
-
-Download and extract it (substitute the real tag/filename from the previous step):
-
-```bash
-wget https://github.com/ggml-org/llama.cpp/releases/download/<TAG>/llama-<TAG>-bin-ubuntu-x64.tar.gz
-```
-
-```bash
-tar -xzf llama-<TAG>-bin-ubuntu-x64.tar.gz
-```
-
-Confirm where the binary landed — this has varied across releases:
-
-```bash
-find . -name "llama-server" -type f
-```
-
-Note: this asset is CPU-only (no CUDA/Vulkan). Fine for this setup; build from source with the appropriate `-DGGML_*` flag if you need GPU offload beyond `-ngl`.
-
-Install `uv` (Python tooling):
+Install `uv`:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -62,186 +52,123 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
----
-
-## 2. Set up the project
+Create the project:
 
 ```bash
-mkdir local-ai-agent && cd local-ai-agent
+mkdir project
 ```
 
 ```bash
-uv init
+cd project
 ```
 
 ```bash
-uv add llm llama-cpp-python
+uv init --package --python 3.10
 ```
 
-> **Version check for tool calling.** `llm`'s tool-calling support (`-T`, `--functions`, `llm.Toolbox`) is a relatively recent addition. Confirm you're on a current release:
-> ```bash
-> uv run llm --version
-> ```
-> If it's noticeably old, upgrade:
-> ```bash
-> uv add --upgrade llm
-> ```
+```bash
+uv add "llm==0.33"
+```
+
+All remaining commands run from inside `project/`.
 
 ---
 
-## 3. Download models
+## 2. Download llama.cpp
 
 ```bash
-uv tool install "huggingface_hub[cli]"
+wget https://github.com/ggml-org/llama.cpp/releases/download/b10795/llama-b10795-bin-ubuntu-x64.tar.gz
 ```
 
-General instruct model:
+```bash
+tar -xzf llama-b10795-bin-ubuntu-x64.tar.gz
+```
+
+This creates `llama-b10795/`, with `llama-server` directly inside it. The build is CPU-only.
+
+---
+
+## 3. Download the model
 
 ```bash
 uv run --with huggingface_hub python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen2.5-0.5B-Instruct-GGUF', filename='qwen2.5-0.5b-instruct-q4_k_m.gguf', local_dir='.')"
 ```
 
-Coder model:
+Optionally verify the download:
 
 ```bash
-uv run --with huggingface_hub python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF', filename='qwen2.5-coder-0.5b-instruct-q4_k_m.gguf', local_dir='.')"
+sha256sum qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
+
+Expected: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`
 
 ---
 
-## 4. Run the server and register it with `llm`
+## 4. Start the server
 
-**Use `llama-server` (the binary from step 1) with `--jinja` — this is required for tool calling, confirmed by testing.** `llama_cpp.server`'s bundled server (`--chat_format chatml` or any other value) silently drops the `tools` field before the model ever sees it — verified directly: a request with a `tools` array produced `prompt_tokens: 20` (no schema injected, plain refusal text) against `llama_cpp.server`, versus `prompt_tokens: 159` and a correct structured `tool_calls` response against `llama-server --jinja` for the identical request. This isn't a model capability gap; it's specific to that codepath. Only use `llama_cpp.server` if you don't need tools at all (see the fallback note at the end of this section).
-
-```bash
-./llama-<TAG>/llama-server -m qwen2.5-0.5b-instruct-q4_k_m.gguf --port 8080 --ctx-size 4000 -ngl 1 --jinja
-```
-
-This exposes `http://localhost:8080/v1/chat/completions`, an OpenAI-compatible endpoint with the full sampling schema (`temperature`, `frequency_penalty`, `presence_penalty`, `top_p`, `max_tokens`, etc.) plus working tool calling.
-
-**Confirm tool-call parsing is actually active.** Check the startup log for a `Chat format:` line:
-
-- `Chat format: Qwen 2.5` — native handler, best reliability. Expected for this model.
-- `Chat format: Generic` — the template wasn't recognized; tool calling still works but is less token-efficient and less reliable.
-
-You can also inspect the active template directly:
+Run the server in its own terminal and leave it running:
 
 ```bash
-curl http://localhost:8080/props
+./llama-b10795/llama-server -m qwen2.5-0.5b-instruct-q4_k_m.gguf --port 8081 --ctx-size 4000 -ngl 1 --jinja
 ```
 
-**Sanity-check tool-schema injection directly**, bypassing `llm` entirely — useful any time tool behavior looks inconsistent, to confirm the server side rather than guessing:
+- `--jinja` is **required** for tool calling.
+- `--ctx-size 4000` is rounded up to 4096 by the server. Prompt and output together must fit in it.
+
+Check that tool calling works on the server side:
 
 ```bash
-curl -s http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "qwen2.5-0.5b-instruct-q4_k_m", "messages": [{"role": "user", "content": "What time is it right now?"}], "tools": [{"type": "function", "function": {"name": "get_current_time", "description": "Get the current system date and time.", "parameters": {"type": "object", "properties": {}}}}]}'
+curl -s http://localhost:8081/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "qwen2.5-0.5b-instruct-q4_k_m", "messages": [{"role": "user", "content": "What time is it right now?"}], "tools": [{"type": "function", "function": {"name": "get_current_time", "description": "Get the current system date and time.", "parameters": {"type": "object", "properties": {}}}}]}'
 ```
 
-A working response has `"finish_reason": "tool_calls"` and a `tool_calls` array, with `prompt_tokens` well above the bare message length (the tool schema and Qwen2.5's `<tools>`/`<tool_call>` instruction block add real bulk). A `prompt_tokens` count barely above the raw message, plain-text refusal content, and no `tool_calls` field means the schema never reached the model — check which server/flags are actually running.
+A working response contains `"finish_reason": "tool_calls"` and about `"prompt_tokens": 159`. A prompt of only about 20 tokens with a plain-text reply means the tool schema never reached the model; check that `--jinja` is set.
 
-**Register it with `llm`** by creating `extra-openai-models.yaml` in your `llm` config dir (find it via `uv run llm logs path`, then use the same directory):
+---
 
-```yaml
-- model_id: local-instruct
-  model_name: qwen2.5-0.5b-instruct-q4_k_m
-  api_base: "http://localhost:8080/v1"
-  api_key_name: null
-  supports_tools: true
-```
-
-`supports_tools: true` is required for tool calling — without it, `llm` refuses tool-calling requests client-side (`Error: OpenAI Chat: <model> does not support tools`) before ever contacting the server, regardless of whether the model or server can actually handle it.
-
-Write it with:
+## 5. Register the server with `llm`
 
 ```bash
 mkdir -p ~/.config/io.datasette.llm
 ```
 
 ```bash
-printf '%s\n' \
-  '- model_id: local-instruct' \
-  '  model_name: qwen2.5-0.5b-instruct-q4_k_m' \
-  '  api_base: "http://localhost:8080/v1"' \
-  '  api_key_name: null' \
-  '  supports_tools: true' \
-  > ~/.config/io.datasette.llm/extra-openai-models.yaml
+cat > ~/.config/io.datasette.llm/extra-openai-models.yaml << 'EOF'
+- model_id: qwen-clean-server
+  model_name: qwen2.5-0.5b-instruct-q4_k_m
+  api_base: "http://localhost:8081/v1"
+  api_key_name: null
+  supports_tools: true
+EOF
 ```
 
-Verify it parsed and registered:
+`supports_tools: true` is required. Without it, `llm` refuses tool calls itself, before contacting the server.
+
+Verify:
 
 ```bash
-uv run --with llm python -c "import yaml; print(yaml.safe_load(open('$HOME/.config/io.datasette.llm/extra-openai-models.yaml')))"
+uv run llm models | grep qwen-clean-server
 ```
 
-```bash
-uv run llm models | grep local-instruct
-```
+Expected: `OpenAI Chat: qwen-clean-server`
 
-Repeat for the coder model (or any other GGUF) with a different `model_id` and a server running on a different `--port`.
-
-### Fallback: `llama_cpp.server` (no tool calling)
-
-If you only need sampler control (`temperature`, `frequency_penalty`, etc.) and don't need tools at all, `llama-cpp-python`'s bundled server is a lighter-weight alternative to building/downloading the `llama-server` binary — no separate binary to manage:
-
-```bash
-uv run --with 'llama-cpp-python[server]' python -m llama_cpp.server \
-  --model qwen2.5-0.5b-instruct-q4_k_m.gguf \
-  --n_gpu_layers 1 \
-  --n_ctx 4000 \
-  --port 8080 \
-  --chat_format chatml
-```
-
-Do not register a model on this backend with `supports_tools: true` — confirmed by testing, it silently drops any `tools` array sent to it regardless of `--chat_format` value, so `llm` would report success while no tool call ever actually happens.
+This config is global: it applies to every `llm` on the machine, not just this project.
 
 ---
 
-## 5. Usage
-
-### Method A — Run from anywhere (no project folder needed)
-
-`uvx` builds its own ephemeral environment on every invocation, so this needs no `uv init` / `uv add` at all — it's fully independent of the project folder in step 2. The server just needs to be running (step 4) and the model registered in `extra-openai-models.yaml` — that config is global, so it doesn't matter which method started the server or did the registration.
+## 6. Usage
 
 ```bash
-uvx --with llm llm -m local-instruct "Why is the sky blue?" \
-  -o temperature 0.7 \
-  -o frequency_penalty 0.3 \
-  -o presence_penalty 0.3
+uv run llm -m qwen-clean-server "Why is the sky blue?" -o temperature 0.7 -o frequency_penalty 0.3 -o presence_penalty 0.3
 ```
 
-> **Config is shared regardless of method.** `~/.config/io.datasette.llm/` (`extra-openai-models.yaml`, `logs.db`) is one global location `llm` reads from no matter how `llm` itself was launched — `uvx`, `uv run` in a project (Method B), or a plain `uv tool install`. Registration (step 4) only needs to happen once; it's immediately visible under every method.
->
-> **`uvx` is cached, not reinstalled each time** — `uv` caches resolved environments/wheels, so repeat invocations are fast even though no project files are created. If you'd rather not resolve the environment on every call, install it once as a persistent tool instead:
-> ```bash
-> uv tool install llm
-> ```
-> After that, just run `llm -m local-instruct "..."` directly, with no `uvx`/`uv run` prefix needed.
+These settings prevent the repetition loops a 0.5B model falls into during open-ended text. For tool calls, use `temperature 0.0` instead (see §7).
 
-### Method B — Project folder workflow
-
-Once initial setup (steps 2–4) is done, your daily routine is just:
-
-```bash
-cd local-ai-agent
-```
-
-Make sure the server from step 4 is running, then:
-
-```bash
-uv run llm -m local-instruct "Why is the sky blue?" \
-  -o temperature 0.7 \
-  -o frequency_penalty 0.3 \
-  -o presence_penalty 0.3
-```
-
-You never need to re-run `uv init`, `uv add`, or re-download models — they persist in the project folder.
-
-### Python API
+From Python:
 
 ```python
 import llm
-model = llm.get_model("local-instruct")
+
+model = llm.get_model("qwen-clean-server")
 response = model.prompt(
     "Why is the sky blue?",
     system="Answer in one sentence.",
@@ -252,57 +179,18 @@ response = model.prompt(
 print(response.text())
 ```
 
-Omit `max_tokens` for uncapped output — it's bounded only by `--ctx-size` on the server.
-
 ---
 
-## 6. Tool calling
+## 7. Tool calling
 
-`llm`'s tool support works the same regardless of backend — it converts your Python function into a JSON Schema tool definition, sends it alongside the prompt, and executes the function if the model requests it. The backend must be `llama-server` with `--jinja` (step 4) — `llama_cpp.server` does not support this at all, confirmed by testing, regardless of its `--chat_format` setting.
+`llm --functions tools.py` exposes every function in the file to the model as a tool. When the model calls one, `llm` runs it and passes the result back.
 
-**CLI**, using `llm`'s `--functions` flag with an inline function:
-
-```bash
-uv run llm -m local-instruct --functions '
-def get_weather(location: str) -> str:
-    """Get the current weather for a location."""
-    return f"Sunny and 72F in {location}"
-' "What is the weather in Seattle?"
-```
-
-**Python API**:
+Create `tools.py`:
 
 ```python
-import llm
-
-def get_weather(location: str) -> str:
-    """Get the current weather for a location."""
-    return f"Sunny and 72F in {location}"
-
-model = llm.get_model("local-instruct")
-chain_response = model.chain(
-    "What is the weather in Seattle?",
-    tools=[get_weather],
-)
-print(chain_response.text())
-```
-
-### Tool-call reliability at small model sizes
-
-Two distinct failure modes show up at small parameter counts (confirmed by repeated testing on Qwen2.5-0.5B), and they need different fixes:
-
-**1. Whether the tool gets called at all is noisy at default sampling settings.** The same exact prompt, run repeatedly with no `-o temperature` flag, called the tool roughly half the time and asked a clarifying question (rather than using the documented default argument) the other half. This is a sampling-decision problem, not a capability ceiling — running the identical prompt 10 times at `-o temperature 0.0` produced 10/10 correct tool calls. For any tool-reliant prompt, prefer low/zero temperature:
-
-```bash
-uv run llm -m local-instruct --functions tools.py -o temperature 0.0 "What time is it right now?"
-```
-
-Note the tension this creates: low temperature stabilizes tool-call decisions, but it's the opposite of the `temperature 0.7`/`frequency_penalty`/`presence_penalty` settings used earlier in this README to fix repetition loops in open-ended generation. There isn't one setting that's right for both — pick per use case (tool-heavy vs. conversational), rather than assuming one temperature value works everywhere.
-
-**2. Reasoning about a correct tool result afterward is a separate, harder problem — temperature does not fix it.** Even with a perfectly correct tool call and result, the model can still misdescribe or mis-transform that result in its final answer (e.g. converting `14:30` to 12-hour time incorrectly, or describing `22:56` as being in "24-hour clock (12-hour clock with AM/PM)"). This is a reasoning/accuracy failure, not a sampling-noise failure, so lowering temperature does not reliably fix it. The effective fix is pushing the computation into the tool itself rather than the model's free-text reasoning — e.g. add a `format` parameter to the tool so the model only has to pick the right argument, rather than doing the conversion in its answer:
-
-```python
+# tools.py
 import datetime
+
 
 def get_current_time(format: str = "24h") -> str:
     """Get the current system time. Set format to '12h' for 12-hour clock with AM/PM, or '24h' for 24-hour clock."""
@@ -310,56 +198,135 @@ def get_current_time(format: str = "24h") -> str:
     if format == "12h":
         return now.strftime("%I:%M %p")
     return now.strftime("%H:%M:%S")
+
+
+def calculate(expression: str) -> str:
+    """Evaluate a basic arithmetic expression. Supports +, -, *, /, **, and parentheses only."""
+    import ast
+    import operator
+
+    ops = {
+        ast.Add: operator.add, ast.Sub: operator.sub,
+        ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.Pow: operator.pow, ast.USub: operator.neg,
+    }
+
+    def eval_node(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        elif isinstance(node, ast.BinOp):
+            return ops[type(node.op)](eval_node(node.left), eval_node(node.right))
+        elif isinstance(node, ast.UnaryOp):
+            return ops[type(node.op)](eval_node(node.operand))
+        raise ValueError("Unsupported expression")
+
+    tree = ast.parse(expression, mode="eval")
+    return str(eval_node(tree.body))
+
+
+def days_until(date_str: str) -> str:
+    """Calculate days remaining until a given date. Format: YYYY-MM-DD."""
+    target = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    today = datetime.date.today()
+    delta = (target - today).days
+    return f"{delta} days" if delta >= 0 else f"{-delta} days ago"
+
+
+def days_until_named_holiday(name: str) -> str:
+    """Calculate days remaining until a named holiday this year. Supports: christmas, new year's, halloween."""
+    today = datetime.date.today()
+    holidays = {
+        "christmas": (12, 25),
+        "new year's": (1, 1),
+        "halloween": (10, 31),
+    }
+    key = name.strip().lower()
+    if key not in holidays:
+        return f"Unknown holiday: {name}"
+    month, day = holidays[key]
+    target = datetime.date(today.year, month, day)
+    if target < today:
+        target = datetime.date(today.year + 1, month, day)
+    delta = (target - today).days
+    return f"{delta} days"
 ```
 
-As a general principle for evaluating small local models: the model's job should be *deciding which tool to call and with what arguments* — that's the part it's most reliable at, even at small sizes once sampling is tuned. Anything requiring multi-step reasoning on a result (arithmetic, format conversion, filtering) is more robust pushed into the tool as another argument or a second tool call, rather than trusted to the model's own reasoning after the fact.
-
-### Working-directory tools
-
-Since `--functions` accepts arbitrary Python, and that Python runs in your actual shell environment, tools aren't limited to toy examples — they can read files, list directories, or run commands, turning `llm` into a working-directory-aware assistant rather than just a chat window. Nothing is automatic: the model only gets the capabilities you explicitly write functions for.
-
-From inside `local-ai-agent`:
+Try it:
 
 ```bash
-uv run llm -m local-instruct --functions '
-import os
-
-def list_files(directory: str = ".") -> str:
-    """List files in a directory."""
-    return "\n".join(os.listdir(directory))
-
-def read_file(path: str) -> str:
-    """Read the contents of a text file."""
-    with open(path) as f:
-        return f.read()
-' "What Python files are in this directory, and what does the main one do?"
+uv run llm -m qwen-clean-server --functions tools.py -o temperature 0.0 "What time is it right now?"
 ```
-
-The model calls `list_files`, sees the results, decides to call `read_file` on whatever looks relevant, and answers using the actual file contents — grounded in the real filesystem, not guesses.
-
-**For repeated use, a `--functions` file beats inline strings.** Keep a `tools.py` in the project folder with your working-directory-aware functions, versioned alongside everything else, and point `llm` at it directly:
 
 ```bash
-uv run llm -m local-instruct --functions tools.py "..."
+uv run llm -m qwen-clean-server --functions tools.py -o temperature 0.0 "What is (17 * 23) + 4?"
 ```
 
-> **Safety note.** Exposing tools — especially anything that reads/writes files or runs shell commands — means the model's output is effectively deciding what code executes on your machine. Keep functions narrow and specific (read-only where possible) rather than something broad like `run_shell(cmd: str)`, especially while you're still validating reliability on a 0.5B model.
+Add `--td` (tools debug) to see each tool call and its result.
+
+### Lessons from testing on a 0.5B model
+
+- **Use `-o temperature 0.0` for tool prompts.** At default settings, the same prompt called the tool only about half the time. At `0.0` it went 10/10.
+- **Put the computation in the tool, not in the model.** The model reliably picks a tool and its arguments, but it often garbles results. For example, it converted `14:30` to 12-hour time incorrectly. So `get_current_time` takes a `format` argument, and `calculate` does the arithmetic.
+- **Keep module scope clean.** `--functions` treats *every* callable at the top level of the file as a tool. Use `import datetime`, not `from datetime import datetime`, and put other imports inside the function that needs them, as `calculate` does.
+- **`calculate` never uses `eval()`.** It walks the AST and allows only arithmetic, so the model can't run arbitrary code through it.
+
+> **Safety:** tools run as real Python on your machine, and the model decides when to call them. Keep them narrow and read-only where possible.
 
 ---
 
-## Troubleshooting notes
+## 8. YouTube transcript summarizer
 
-- **`ValidationError: Extra inputs are not permitted` for `temperature`/`repeat_penalty`** — you're calling a model registered through the `llm-llama-cpp` plugin's direct bindings instead of the server-backed setup above. That plugin's `Options` schema doesn't expose sampler params at all — switch to the server-backed registration instead.
-- **`llama-server: command not found`** — the binary isn't on your `PATH` and probably isn't downloaded yet. Follow step 1's GitHub release download rather than assuming an install script placed it — asset naming and script availability both drift over time. Or use `llama_cpp.server` as a temporary fallback if you don't need tools right now (see step 4's fallback section) — no separate binary required.
-- **`TypeError: 'NoneType' object is not iterable` from `register_models`** — `extra-openai-models.yaml` exists but is empty. `yaml.safe_load()` on an empty file returns `None`. Rewrite the file with actual YAML list content (see step 4).
-- **Repetition loops on small models** — set `temperature` (e.g. `0.7`) and `frequency_penalty`/`presence_penalty` (e.g. `0.3`) via the server-backed endpoint.
-- **Model responds with plain text instead of a tool call, or `tool_calls` comes back empty** — confirmed cause: the server is `llama_cpp.server`, which silently drops the `tools` field regardless of `--chat_format`. Switch to `llama-server --jinja` (step 4) — there's no fix on the `llama_cpp.server` side, it doesn't support tool-schema injection at all. If you're already on `llama-server`, confirm `--jinja` is actually present in the running command and check the `Chat format:` startup log line isn't blank/unrecognized.
-- **`Error: OpenAI Chat: <model> does not support tools`** — this is `llm` refusing client-side before any request is sent, not the server rejecting anything. Add `supports_tools: true` to that model's entry in `extra-openai-models.yaml` (step 4) and retry.
-- **`ValueError: no signature found for builtin type <class 'datetime.datetime'>`** (or similar for other stdlib classes) — `llm`'s `--functions` auto-discovery inspects every callable in the file's module scope as a potential tool, not just the function(s) you intended. `from datetime import datetime` pulls the `datetime` class itself into scope, and `llm` tries (and fails) to treat it as a tool. Fix: `import datetime` instead, and reference `datetime.datetime.now()` inside your function body — this keeps only your actual function at module scope.
-- **Same prompt sometimes calls the tool, sometimes doesn't (or asks a clarifying question instead of using a documented default)** — this is sampling noise on the decision boundary, not a broken tool. Add `-o temperature 0.0` for tool-reliant prompts; see "Tool-call reliability at small model sizes" in §6 for the full finding and its trade-off against repetition-loop settings used elsewhere in this README.
-- **Tool call and result are correct, but the model's final answer misdescribes or mis-transforms the result** (wrong unit conversion, self-contradictory description, etc.) — this is a reasoning-accuracy issue, not sampling noise; lowering temperature does not fix it. Push the computation into the tool itself (e.g. an explicit `format` parameter) rather than relying on the model to transform the result correctly in free text. See §6.
+This fetches a video's auto-generated English subtitles, strips the timing markup and duplicate lines, and asks the model for a summary. No video is downloaded.
+
+Install `yt-dlp`:
+
+```bash
+uv tool install yt-dlp
+```
+
+Create `yt-summarize.sh`:
+
+```bash
+#!/bin/bash
+# Usage: ./yt-summarize.sh "https://youtube.com/watch?v=..."
+
+yt-dlp --write-auto-sub --skip-download --sub-lang en --sub-format vtt -o "/tmp/yt-transcript.%(ext)s" "$1" \
+  && sed -e '/-->/d' -e '/^WEBVTT/d' -e '/^$/d' -e 's/<[^>]*>//g' /tmp/yt-transcript.en.vtt \
+  | awk '!seen[$0]++' \
+  | uv run llm -m qwen-clean-server "Summarize the following"
+```
+
+```bash
+chmod +x yt-summarize.sh
+```
+
+Run it (with the server up):
+
+```bash
+./yt-summarize.sh "https://www.youtube.com/watch?v=bk-p1ZURaSE"
+```
+
+What each stage does:
+
+1. `yt-dlp` saves only the subtitles, to `/tmp/yt-transcript.en.vtt`.
+2. `sed` removes the header, the timestamp lines, blank lines and inline tags.
+3. `awk` drops repeated lines. Auto-captions repeat each line as they scroll.
+4. `llm` summarizes the cleaned text from stdin.
+
+Limits: long videos can exceed the 4096-token context; raise `--ctx-size` if you have the RAM. Two runs at once overwrite each other's `/tmp` file.
 
 ---
+
+## Troubleshooting
+
+- **`Error: OpenAI Chat: <model> does not support tools`:** add `supports_tools: true` to the YAML (§5).
+- **`TypeError: 'NoneType' object is not iterable` from `register_models`:** the YAML file is empty. Rewrite it with the command in §5.
+- **Plain-text reply instead of a tool call:** check that `--jinja` is on the server command, then run the `curl` check in §4.
+- **`ValueError: no signature found for builtin type ...`:** an import in `tools.py` put a class at the top level of the file. Use `import datetime` (§7).
+- **The tool is only sometimes called:** add `-o temperature 0.0`.
+- **The tool result is right but the answer is wrong:** lowering the temperature won't help. Move that step into the tool.
+- **Repetition loops:** use `-o temperature 0.7 -o frequency_penalty 0.3 -o presence_penalty 0.3`.
+- **Connection errors from `llm`:** the server isn't running, or it's not on port 8081.
 
 ## Offline / backup notes
 
