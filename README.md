@@ -1,6 +1,7 @@
 ## contents
 
 - [CPU-only tool-calling AI agent](#cpu-only-tool-calling-ai-agent)
+- [8. YouTube transcript summarizer](#8-youtube-transcript-summarizer)
 - [Offline / backup notes](#offline--backup-notes)
 
 # CPU-only-tool-calling-AI-Agent
